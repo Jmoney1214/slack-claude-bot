@@ -16,6 +16,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const LightspeedIntelligence = require('./lightspeed-intelligence');
 
 // Initialize Slack App
 const app = new App({
@@ -80,75 +81,42 @@ function loadLightspeedConfig() {
 
 const LIGHTSPEED = loadLightspeedConfig();
 
+// Initialize Lightspeed Intelligence Module
+let lightspeedIntelligence = null;
+if (LIGHTSPEED) {
+  lightspeedIntelligence = new LightspeedIntelligence({
+    account_id: LIGHTSPEED.account_id,
+    shop_id: LIGHTSPEED.shop_id,
+    token: LIGHTSPEED.token,
+    base_url: LIGHTSPEED.base_url,
+    timezone: CONFIG.timezone
+  });
+}
+
 /**
  * Fetch today's sales summary
  */
 async function getTodaysSalesSummary() {
-  if (!LIGHTSPEED) {
+  if (!lightspeedIntelligence) {
     return 'Sales data unavailable - Lightspeed not configured.';
   }
 
   try {
-    // Get today's date range
+    const metrics = await lightspeedIntelligence.getSalesMetrics(0, 1);
     const now = new Date();
-    const estString = now.toLocaleString('en-US', { timeZone: CONFIG.timezone });
-    const estDate = new Date(estString);
-
-    const startOfDay = new Date(estDate);
-    startOfDay.setHours(0, 0, 0, 0);
-
-    const isDST = now.toLocaleString('en-US', { timeZone: CONFIG.timezone, timeZoneName: 'short' }).includes('EDT');
-    const offset = isDST ? '-04:00' : '-05:00';
-
-    const formatDate = (date) => {
-      const y = date.getFullYear();
-      const m = String(date.getMonth() + 1).padStart(2, '0');
-      const d = String(date.getDate()).padStart(2, '0');
-      const h = String(date.getHours()).padStart(2, '0');
-      const min = String(date.getMinutes()).padStart(2, '0');
-      const s = String(date.getSeconds()).padStart(2, '0');
-      return `${y}-${m}-${d}T${h}:${min}:${s}${offset}`;
-    };
-
-    const start = formatDate(startOfDay);
-    const end = formatDate(estDate);
-
-    // Fetch sales
-    const url = `${LIGHTSPEED.base_url}/${LIGHTSPEED.account_id}/Sale.json?` +
-      `completeTime=><,${start},${end}&` +
-      `completed=true&` +
-      `shopID=${LIGHTSPEED.shop_id}&` +
-      `load_relations=["SaleLines"]`;
-
-    const response = await axios.get(url, {
-      headers: {
-        'Authorization': `Bearer ${LIGHTSPEED.token}`,
-        'Accept': 'application/json'
-      }
+    const currentTime = now.toLocaleString('en-US', {
+      timeZone: CONFIG.timezone,
+      hour: '2-digit',
+      minute: '2-digit'
     });
-
-    const sales = Array.isArray(response.data.Sale) ? response.data.Sale : (response.data.Sale ? [response.data.Sale] : []);
-
-    // Calculate metrics
-    let totalRevenue = 0;
-    let totalTransactions = 0;
-
-    sales.forEach(sale => {
-      if (sale.voided === 'true') return;
-      const total = parseFloat(sale.calcTotal || 0);
-      if (total > 0) {
-        totalRevenue += parseFloat(sale.calcSubtotal || 0);
-        totalTransactions++;
-      }
-    });
-
-    const avgSale = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
-    const currentTime = estDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
     return `📊 Today's Sales (as of ${currentTime}):\n` +
-           `• Transactions: ${totalTransactions}\n` +
-           `• Revenue: $${totalRevenue.toFixed(2)}\n` +
-           `• Avg Sale: $${avgSale.toFixed(2)}`;
+           `• Transactions: ${metrics.totalTransactions}\n` +
+           `• Revenue: $${metrics.totalRevenue.toFixed(2)}\n` +
+           `• Avg Sale: $${metrics.avgSale.toFixed(2)}\n` +
+           `• Profit: $${metrics.profit.toFixed(2)} (${metrics.profitMargin.toFixed(1)}% margin)\n` +
+           `• Items Sold: ${metrics.totalItems.toFixed(0)}\n` +
+           `• Peak Hour: ${metrics.peakHour}:00`;
 
   } catch (error) {
     console.error('Error fetching sales:', error.message);
@@ -162,19 +130,44 @@ async function getTodaysSalesSummary() {
 function buildSystemPrompt() {
   return `You are Claude, an AI assistant integrated into Slack for ${CONFIG.business_name}.
 
-You have access to real-time business data and can help with:
-- Sales analysis and reporting
+You have access to real-time business data from Lightspeed POS and can help with:
+- Sales analysis and reporting (today, yesterday, this week, any date range)
+- Product performance (top sellers, revenue by product)
+- Customer insights and purchase patterns
+- Channel analysis (In-Store vs UberEats, DoorDash, etc.)
+- Profit margins and business metrics
+- Comparative analysis (today vs yesterday, this week vs last week)
 - Business intelligence queries
-- Data interpretation and insights
-- General business questions
 
 Current date/time: ${new Date().toLocaleString('en-US', { timeZone: CONFIG.timezone })}
 
-When users ask about sales, performance, or business metrics, provide clear, actionable insights.
+When users ask about sales, products, customers, or any business metrics, you'll receive the relevant data.
+Provide clear, actionable insights from the data.
 Be concise in Slack - use bullet points and short paragraphs.
 Use emojis appropriately to make responses engaging.
 
-If asked about sales data and you don't see it in the conversation, let the user know you'll fetch it.`;
+You can answer questions like:
+- "How are sales doing today?"
+- "What are my top selling products this week?"
+- "Compare today to yesterday"
+- "Show me all sales for [product name]"
+- "What's my profit margin today?"
+- "Which delivery channel is performing best?"`;
+}
+
+/**
+ * Detect if query is business/Lightspeed related
+ */
+function isBusinessQuery(message) {
+  const keywords = [
+    'sales', 'revenue', 'profit', 'transaction', 'customer', 'product',
+    'selling', 'today', 'yesterday', 'week', 'month', 'performance',
+    'channel', 'delivery', 'ubereats', 'doordash', 'compare', 'top',
+    'best', 'worst', 'average', 'total', 'margin', 'cost', 'price'
+  ];
+
+  const lowerMessage = message.toLowerCase();
+  return keywords.some(keyword => lowerMessage.includes(keyword));
 }
 
 /**
@@ -185,12 +178,21 @@ async function processWithClaude(userMessage, includeContext = false) {
     let systemPrompt = buildSystemPrompt();
     let userPrompt = userMessage;
 
-    // If context needed, fetch sales data
-    if (includeContext || userMessage.toLowerCase().includes('sales') ||
-        userMessage.toLowerCase().includes('today') ||
-        userMessage.toLowerCase().includes('performance')) {
-      const salesData = await getTodaysSalesSummary();
-      userPrompt = `${salesData}\n\nUser question: ${userMessage}`;
+    // Check if this is a business/Lightspeed query
+    if (lightspeedIntelligence && (includeContext || isBusinessQuery(userMessage))) {
+      console.log('🔍 Detected business query, fetching Lightspeed data...');
+
+      try {
+        // Use the intelligence module to get comprehensive data
+        const businessData = await lightspeedIntelligence.getIntelligentResponse(userMessage);
+
+        if (businessData) {
+          userPrompt = `BUSINESS DATA:\n${businessData}\n\nUSER QUESTION: ${userMessage}\n\nAnalyze the data above and provide insights to answer the user's question.`;
+        }
+      } catch (dataError) {
+        console.error('Error fetching business data:', dataError.message);
+        userPrompt = `${userMessage}\n\n(Note: Could not fetch live data - ${dataError.message})`;
+      }
     }
 
     const response = await anthropic.messages.create({
