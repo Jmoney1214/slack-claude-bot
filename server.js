@@ -180,14 +180,65 @@ async function processWithClaude(userMessage, includeContext = false) {
 
     // Check if this is a business/Lightspeed query
     if (lightspeedIntelligence && (includeContext || isBusinessQuery(userMessage))) {
-      console.log('🔍 Detected business query, fetching Lightspeed data...');
+      console.log('🔍 Detected business query, fetching comprehensive data...');
 
       try {
-        // Use the intelligence module to get comprehensive data
-        const businessData = await lightspeedIntelligence.getIntelligentResponse(userMessage);
+        // Fetch comprehensive business data for Claude to analyze
+        const [todayMetrics, topProducts, comparison] = await Promise.all([
+          lightspeedIntelligence.getSalesMetrics(0, 1).catch(e => null),
+          lightspeedIntelligence.getTopProducts(0, 1, 10).catch(e => null),
+          lightspeedIntelligence.getComparison('daily').catch(e => null)
+        ]);
+
+        // Build comprehensive data context
+        let businessData = '';
+
+        if (todayMetrics) {
+          const now = new Date().toLocaleString('en-US', {
+            timeZone: CONFIG.timezone,
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+
+          businessData += `📊 TODAY'S PERFORMANCE (as of ${now}):\n`;
+          businessData += `• Revenue: $${todayMetrics.totalRevenue.toFixed(2)}\n`;
+          businessData += `• Transactions: ${todayMetrics.totalTransactions}\n`;
+          businessData += `• Average Sale: $${todayMetrics.avgSale.toFixed(2)}\n`;
+          businessData += `• Profit: $${todayMetrics.profit.toFixed(2)} (${todayMetrics.profitMargin.toFixed(1)}% margin)\n`;
+          businessData += `• Items Sold: ${todayMetrics.totalItems.toFixed(0)}\n`;
+          businessData += `• Avg Items/Sale: ${todayMetrics.avgItems.toFixed(1)}\n`;
+          businessData += `• Peak Sales Hour: ${todayMetrics.peakHour}:00\n\n`;
+
+          // Channel breakdown
+          if (todayMetrics.channels && Object.keys(todayMetrics.channels).length > 0) {
+            businessData += `🚚 CHANNEL BREAKDOWN:\n`;
+            Object.entries(todayMetrics.channels)
+              .sort((a, b) => b[1] - a[1])
+              .forEach(([channel, count]) => {
+                const percentage = (count / todayMetrics.totalTransactions * 100).toFixed(1);
+                businessData += `• ${channel}: ${count} orders (${percentage}%)\n`;
+              });
+            businessData += '\n';
+          }
+        }
+
+        if (comparison) {
+          businessData += `📈 COMPARED TO YESTERDAY:\n`;
+          businessData += `• Revenue Change: ${comparison.changes.revenue > 0 ? '+' : ''}${comparison.changes.revenue.toFixed(1)}%\n`;
+          businessData += `• Transaction Change: ${comparison.changes.transactions > 0 ? '+' : ''}${comparison.changes.transactions.toFixed(1)}%\n`;
+          businessData += `• Avg Sale Change: $${comparison.changes.avgSale > 0 ? '+' : ''}${comparison.changes.avgSale.toFixed(2)}\n\n`;
+        }
+
+        if (topProducts && topProducts.length > 0) {
+          businessData += `🏆 TOP SELLING PRODUCTS TODAY:\n`;
+          topProducts.slice(0, 5).forEach((p, i) => {
+            businessData += `${i + 1}. ${p.description}: $${p.revenue.toFixed(2)} revenue (${p.quantity} units)\n`;
+          });
+          businessData += '\n';
+        }
 
         if (businessData) {
-          userPrompt = `BUSINESS DATA:\n${businessData}\n\nUSER QUESTION: ${userMessage}\n\nAnalyze the data above and provide insights to answer the user's question.`;
+          userPrompt = `LIVE BUSINESS DATA:\n${businessData}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nUSER QUESTION: "${userMessage}"\n\nPlease analyze the data above and answer the user's question. Provide insights, trends, and actionable recommendations based on the data. Be conversational and helpful.`;
         }
       } catch (dataError) {
         console.error('Error fetching business data:', dataError.message);
