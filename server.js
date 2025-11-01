@@ -42,11 +42,26 @@ const CONFIG = {
  * Load Lightspeed configuration if available
  */
 function loadLightspeedConfig() {
+  // First check environment variables (for Render deployment)
+  if (process.env.LIGHTSPEED_ACCOUNT_ID &&
+      process.env.LIGHTSPEED_SHOP_ID &&
+      process.env.LIGHTSPEED_TOKEN) {
+    console.log('✅ Loading Lightspeed config from environment variables');
+    return {
+      account_id: process.env.LIGHTSPEED_ACCOUNT_ID,
+      shop_id: process.env.LIGHTSPEED_SHOP_ID,
+      token: process.env.LIGHTSPEED_TOKEN,
+      base_url: 'https://api.lightspeedapp.com/API/Account'
+    };
+  }
+
+  // Fallback to config files (for local development)
   try {
     const configPath = path.join(__dirname, '..', 'config', 'bot-config.json');
     const tokenPath = path.join(__dirname, '..', 'config', 'lightspeed-token.txt');
 
     if (fs.existsSync(configPath) && fs.existsSync(tokenPath)) {
+      console.log('✅ Loading Lightspeed config from files');
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       const token = fs.readFileSync(tokenPath, 'utf8').trim();
 
